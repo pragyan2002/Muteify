@@ -180,6 +180,105 @@ def get_current_volume() -> float:
     return -1.0
 
 
+def is_spotify_running() -> bool:
+    """
+    Check if 'Spotify.exe' is running on Windows.
+    Returns True if found, otherwise False.
+    """
+    for proc in psutil.process_iter(['name']):
+        if proc.info['name'] and proc.info['name'].lower() == 'spotify.exe':
+            #print("Spotify session found!")
+            return True
+    return False
+
+
+def get_spotify_metadata() -> dict:
+    """
+    Returns a dict that might look like:
+    {
+      "is_ad": bool,
+      "title": str or None,
+      "artists": [str],
+      "duration_ms": int or 0,
+      "progress_ms": int or 0,
+      "track_id": str or None
+    }
+    or None if we truly cannot get any info at all (e.g., error, offline).
+    """
+    access_token, refresh_token = load_tokens_from_file()
+    if not access_token:
+        print("No access token found. Please run auth flow.")
+        return None
+
+    url = "https://api.spotify.com/v1/me/player/currently-playing"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    
+    try:
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 204:
+            # 204 means no content — maybe user is paused or no track info
+            return None
+        if resp.status_code == 401:
+            new_access_token, new_refresh_token = refresh_access_token(refresh_token)
+            if not new_access_token:
+                print("Token refresh failed.")
+                return None
+            # Save new tokens
+            save_tokens_to_file(new_access_token, new_refresh_token)
+            
+            # Attempt the request again with the new token
+            headers = {"Authorization": f"Bearer {new_access_token}"}
+            resp = requests.get(url, headers=headers, timeout=5)
+
+        if resp.status_code != 200:
+            print("Error status:", resp.status_code)
+            return None
+
+        data = resp.json()
+        if not data:
+            return None
+
+        # Extract the basic fields
+        currently_playing_type = data.get("currently_playing_type")
+        is_ad = (currently_playing_type == "ad")
+
+        # "item" may be None if it's an ad
+        item = data.get("item")
+        track_name = item.get("name") if item else None
+        track_id = item.get("id") if item else None
+        duration_ms = item.get("duration_ms") if item else 0
+
+        progress_ms = data.get("progress_ms", 0)
+
+        return {
+            "is_ad": is_ad,
+            "title": track_name,
+            "artists": [artist["name"] for artist in item["artists"]] if item and "artists" in item else [],
+            "duration_ms": duration_ms,
+            "progress_ms": progress_ms,
+            "track_id": track_id
+        }
+
+    except requests.exceptions.RequestException as e:
+        print("Request error:", e)
+        return None
+
+
+
+def get_current_volume() -> float:
+    """
+    Returns Spotify's current volume (0.0 - 1.0).
+    If Spotify is not found, returns -1.0.
+    """
+    sessions = AudioUtilities.GetAllSessions()
+    for session in sessions:
+        proc = session.Process
+        if proc and proc.name() and proc.name().lower() == 'spotify.exe':
+            volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+            return volume.GetMasterVolume()
+    return -1.0
+
+
 def set_spotify_volume(volume_percent: float) -> bool:
     """
     Sets Spotify's volume to volume_percent (0.0 - 100.0).
