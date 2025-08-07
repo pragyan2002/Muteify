@@ -11,6 +11,7 @@ import requests
 # PyCaw imports
 from ctypes import POINTER, cast
 from comtypes import CLSCTX_ALL
+from typing import Iterable
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume, ISimpleAudioVolume
 
 from dotenv import load_dotenv
@@ -165,7 +166,6 @@ def get_spotify_metadata() -> dict:
         return None
 
 
-
 def get_current_volume() -> float:
     """
     Returns Spotify's current volume (0.0 - 1.0).
@@ -189,6 +189,29 @@ def is_spotify_running() -> bool:
         if proc.info['name'] and proc.info['name'].lower() == 'spotify.exe':
             #print("Spotify session found!")
             return True
+    return False
+
+def _is_spotify_session(session) -> bool:
+    """
+    True for any session that obviously belongs to Spotify even the
+    ghost ones that have no .Process object attached.
+    """
+    # 1) Classical case: the Process object exists
+    proc = session.Process
+    if proc and proc.name().lower().startswith("spotify"):
+        return True
+
+    # 2) Fallbacks for orphan / remote sessions
+    try:
+        # Display name often contains “Spotify” for these
+        if "spotify" in (session._ctl.GetDisplayName() or "").lower():
+            return True
+        # InstanceIdentifier is another reliable tell-tale
+        if "spotify" in (session.InstanceIdentifier or "").lower():
+            return True
+    except Exception:
+        pass
+
     return False
 
 
@@ -264,7 +287,6 @@ def get_spotify_metadata() -> dict:
         return None
 
 
-
 def get_current_volume() -> float:
     """
     Returns Spotify's current volume (0.0 - 1.0).
@@ -296,6 +318,40 @@ def set_spotify_volume(volume_percent: float) -> bool:
             return True
     return False
 
+def set_spotify_volume_all(volume_percent: float) -> bool:
+    """
+    Set *every* Spotify audio session to `volume_percent` (0–100).
+    Returns True if at least one session was successfully updated.
+    """
+    volume_percent = max(0.0, min(100.0, volume_percent))   # clamp
+    desired = volume_percent / 100.0                        # → scalar 0-1
+
+    success = False
+    for session in AudioUtilities.GetAllSessions():          # ← all sessions
+        if _is_spotify_session(session):
+            try:
+                session._ctl.QueryInterface(
+                    ISimpleAudioVolume
+                ).SetMasterVolume(desired, None)
+                success = True
+            except Exception as e:
+                # Don’t die because one session is funky – just log and move on
+                print(f"[Muteify] Couldn’t set volume for a Spotify session: {e}")
+
+    return success
+
+def get_current_spotify_volume() -> float:
+    """
+    Return the *highest* volume found across all Spotify sessions.
+    (-1.0 if none are found).
+    """
+    volumes: Iterable[float] = [
+        session._ctl.QueryInterface(ISimpleAudioVolume).GetMasterVolume()
+        for session in AudioUtilities.GetAllSessions()
+        if _is_spotify_session(session)
+    ]
+    return max(volumes) if volumes else -1.0
+
 
 ###############################################################################
 # 3) MAIN MONITORING LOGIC
@@ -322,10 +378,10 @@ def monitor_spotify():
             if meta["is_ad"]:
                 print("Ad is playing!")
                 if not is_lowered:
-                    current_vol = get_current_volume()
+                    current_vol = get_current_spotify_volume()
                     if current_vol >= 0.0:
                         original_volume = current_vol
-                    set_spotify_volume(5)  # 5% volume
+                    set_spotify_volume_all(5)  # 5% volume
                     is_lowered = True
             else:
                 track_name = meta["title"]
@@ -333,7 +389,7 @@ def monitor_spotify():
                 print(f"Currently playing: {track_name} by {', '.join(artists)}")
                 if is_lowered:
                     if original_volume is not None:
-                        set_spotify_volume(original_volume * 100)
+                        set_spotify_volume_all(original_volume * 100)
                     is_lowered = False
                     original_volume = None
 
