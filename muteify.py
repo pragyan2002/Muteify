@@ -1,212 +1,185 @@
 """
-Muteify - A Windows-based script to detect if Spotify is playing advertisements
-and automatically lower the volume. Uses the Spotify Web API + OAuth tokens for ad detection.
+Muteify - Windows-only local ad muter for Spotify.
+
+This implementation does NOT call the Spotify Web API.
+It infers ad playback from local Spotify window metadata and
+controls Spotify session volume through PyCaw.
 """
 
-import os
+import ctypes
 import time
+from ctypes import wintypes
+from typing import Iterable, Optional
+
 import psutil
-import requests
+from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
 
-# PyCaw imports
-from ctypes import POINTER, cast
-from comtypes import CLSCTX_ALL
-from typing import Iterable
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume, ISimpleAudioVolume
+# ---------------------------------------------------------------------------
+# Win32 window helpers (no Spotify API required)
+# ---------------------------------------------------------------------------
 
-from dotenv import load_dotenv
-load_dotenv()
+_is_windows = hasattr(ctypes, "windll")
 
-###############################################################################
-# 1) TOKEN MANAGEMENT HELPERS
-###############################################################################
+if _is_windows:
+    _user32 = ctypes.windll.user32
+else:
+    _user32 = None
 
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "YOUR_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "YOUR_CLIENT_SECRET")
-
-TOKEN_FILE = "tokens.txt"
-
-def load_tokens_from_file():
-    """
-    Reads ACCESS_TOKEN and REFRESH_TOKEN from a local 'tokens.txt' file.
-    Returns (access_token, refresh_token).
-    """
-    access_token = None
-    refresh_token = None
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, "r") as f:
-            for line in f:
-                if line.startswith("ACCESS_TOKEN"):
-                    access_token = line.split("=")[1].strip()
-                elif line.startswith("REFRESH_TOKEN"):
-                    refresh_token = line.split("=")[1].strip()
-    return access_token, refresh_token
-
-
-def save_tokens_to_file(access_token, refresh_token):
-    """
-    Saves ACCESS_TOKEN and REFRESH_TOKEN to 'tokens.txt'.
-    Overwrites any existing tokens.
-    """
-    with open(TOKEN_FILE, "w") as f:
-        f.write(f"ACCESS_TOKEN={access_token}\n")
-        f.write(f"REFRESH_TOKEN={refresh_token}\n")
-
-
-def refresh_access_token(refresh_token):
-    """
-    Uses the Spotify API to exchange a refresh_token for a new access_token.
-    Returns (new_access_token, new_refresh_token) or (None, None) on failure.
-    """
-    url = "https://accounts.spotify.com/api/token"
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": SPOTIFY_CLIENT_ID,
-        "client_secret": SPOTIFY_CLIENT_SECRET,
-    }
-    response = requests.post(url, data=data)
-
-    if response.status_code == 200:
-        json_data = response.json()
-        new_access_token = json_data.get("access_token")
-        # Spotify might or might not return a new refresh token
-        new_refresh_token = json_data.get("refresh_token", refresh_token)
-        return new_access_token, new_refresh_token
-    else:
-        print("Error refreshing token:", response.text)
-        return None, None
-
-
-###############################################################################
-# 2) CORE FUNCTIONS
-###############################################################################
 
 def is_spotify_running() -> bool:
-    """
-    Check if 'Spotify.exe' is running on Windows.
-    Returns True if found, otherwise False.
-    """
-    for proc in psutil.process_iter(['name']):
-        if proc.info['name'] and proc.info['name'].lower() == 'spotify.exe':
-            #print("Spotify session found!")
+    """Return True if Spotify.exe is running."""
+    for proc in psutil.process_iter(["name"]):
+        name = proc.info.get("name")
+        if name and name.lower() == "spotify.exe":
             return True
     return False
 
 
-def get_spotify_metadata() -> dict:
+def _spotify_pids() -> set[int]:
+    pids: set[int] = set()
+    for proc in psutil.process_iter(["pid", "name"]):
+        name = proc.info.get("name")
+        if name and name.lower() == "spotify.exe":
+            pid = proc.info.get("pid")
+            if pid:
+                pids.add(int(pid))
+    return pids
+
+
+def _window_title_for_pid(target_pids: set[int]) -> Optional[str]:
     """
-    Returns a dict that might look like:
-    {
-      "is_ad": bool,
-      "title": str or None,
-      "artists": [str],
-      "duration_ms": int or 0,
-      "progress_ms": int or 0,
-      "track_id": str or None
-    }
-    or None if we truly cannot get any info at all (e.g., error, offline).
+    Return the first visible top-level window title owned by a Spotify PID.
     """
-    access_token, refresh_token = load_tokens_from_file()
-    if not access_token:
-        print("No access token found. Please run auth flow.")
+    if not _is_windows or not target_pids:
         return None
 
-    url = "https://api.spotify.com/v1/me/player/currently-playing"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    
-    try:
-        resp = requests.get(url, headers=headers, timeout=5)
-        if resp.status_code == 204:
-            # 204 means no content — maybe user is paused or no track info
-            return None
-        if resp.status_code == 401:
-            new_access_token, new_refresh_token = refresh_access_token(refresh_token)
-            if not new_access_token:
-                print("Token refresh failed.")
-                return None
-            # Save new tokens
-            save_tokens_to_file(new_access_token, new_refresh_token)
-            
-            # Attempt the request again with the new token
-            headers = {"Authorization": f"Bearer {new_access_token}"}
-            resp = requests.get(url, headers=headers, timeout=5)
+    titles: list[str] = []
 
-        if resp.status_code != 200:
-            print("Error status:", resp.status_code)
-            return None
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
-        data = resp.json()
-        if not data:
-            return None
+    def callback(hwnd, _lparam):
+        if not _user32.IsWindowVisible(hwnd):
+            return True
 
-        # Extract the basic fields
-        currently_playing_type = data.get("currently_playing_type")
-        is_ad = (currently_playing_type == "ad")
+        pid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value not in target_pids:
+            return True
 
-        # "item" may be None if it's an ad
-        item = data.get("item")
-        track_name = item.get("name") if item else None
-        track_id = item.get("id") if item else None
-        duration_ms = item.get("duration_ms") if item else 0
+        length = _user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
 
-        progress_ms = data.get("progress_ms", 0)
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        _user32.GetWindowTextW(hwnd, buffer, length + 1)
+        title = buffer.value.strip()
+        if title:
+            titles.append(title)
+            # Found a useful title, stop enumeration.
+            return False
 
+        return True
+
+    _user32.EnumWindows(EnumWindowsProc(callback), 0)
+
+    if not titles:
+        return None
+    return titles[0]
+
+
+def _parse_spotify_window_title(title: str) -> dict:
+    """
+    Parse Spotify window title to infer track/ad state.
+
+    Common patterns:
+    - "Song Name • Artist"
+    - "Song Name - Artist"
+    - "Advertisement"
+    - "Spotify"
+    """
+    lowered = title.lower().strip()
+
+    ad_keywords = {
+        "advertisement",
+        "spotify advertisement",
+        "spotify ad",
+        "ad",
+    }
+
+    if lowered in ad_keywords or "advertisement" in lowered:
         return {
-            "is_ad": is_ad,
-            "title": track_name,
-            "artists": [artist["name"] for artist in item["artists"]] if item and "artists" in item else [],
-            "duration_ms": duration_ms,
-            "progress_ms": progress_ms,
-            "track_id": track_id
+            "is_ad": True,
+            "title": title,
+            "artists": [],
         }
 
-    except requests.exceptions.RequestException as e:
-        print("Request error:", e)
+    # Best-effort title parsing for "title • artist" or "title - artist"
+    for separator in (" • ", " - "):
+        if separator in title:
+            left, right = title.split(separator, 1)
+            track = left.strip()
+            artist = right.strip()
+            if track and artist:
+                return {
+                    "is_ad": False,
+                    "title": track,
+                    "artists": [artist],
+                }
+
+    # Unknown/non-track states often show just "Spotify" or single labels.
+    if lowered in {"spotify", "spotify premium", "spotify free"}:
+        return {
+            "is_ad": False,
+            "title": None,
+            "artists": [],
+        }
+
+    # Single-piece title fallback.
+    return {
+        "is_ad": False,
+        "title": title,
+        "artists": [],
+    }
+
+
+def get_spotify_metadata_local() -> Optional[dict]:
+    """
+    Obtain best-effort now-playing metadata from local window title.
+    Returns None when Spotify isn't running or no useful title exists yet.
+    """
+    pids = _spotify_pids()
+    if not pids:
         return None
 
+    window_title = _window_title_for_pid(pids)
+    if not window_title:
+        return None
 
-def get_current_volume() -> float:
-    """
-    Returns Spotify's current volume (0.0 - 1.0).
-    If Spotify is not found, returns -1.0.
-    """
-    sessions = AudioUtilities.GetAllSessions()
-    for session in sessions:
-        proc = session.Process
-        if proc and proc.name() and proc.name().lower() == 'spotify.exe':
-            volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-            return volume.GetMasterVolume()
-    return -1.0
+    parsed = _parse_spotify_window_title(window_title)
+    return {
+        "is_ad": parsed["is_ad"],
+        "title": parsed["title"],
+        "artists": parsed["artists"],
+        "window_title": window_title,
+    }
 
 
-def is_spotify_running() -> bool:
-    """
-    Check if 'Spotify.exe' is running on Windows.
-    Returns True if found, otherwise False.
-    """
-    for proc in psutil.process_iter(['name']):
-        if proc.info['name'] and proc.info['name'].lower() == 'spotify.exe':
-            #print("Spotify session found!")
-            return True
-    return False
+# ---------------------------------------------------------------------------
+# Volume control helpers
+# ---------------------------------------------------------------------------
 
 def _is_spotify_session(session) -> bool:
     """
-    True for any session that obviously belongs to Spotify even the
-    ghost ones that have no .Process object attached.
+    Return True for sessions that belong to Spotify,
+    including some orphaned sessions with no Process object.
     """
-    # 1) Classical case: the Process object exists
     proc = session.Process
-    if proc and proc.name().lower().startswith("spotify"):
+    if proc and proc.name() and proc.name().lower().startswith("spotify"):
         return True
 
-    # 2) Fallbacks for orphan / remote sessions
     try:
-        # Display name often contains “Spotify” for these
         if "spotify" in (session._ctl.GetDisplayName() or "").lower():
             return True
-        # InstanceIdentifier is another reliable tell-tale
         if "spotify" in (session.InstanceIdentifier or "").lower():
             return True
     except Exception:
@@ -215,135 +188,28 @@ def _is_spotify_session(session) -> bool:
     return False
 
 
-def get_spotify_metadata() -> dict:
-    """
-    Returns a dict that might look like:
-    {
-      "is_ad": bool,
-      "title": str or None,
-      "artists": [str],
-      "duration_ms": int or 0,
-      "progress_ms": int or 0,
-      "track_id": str or None
-    }
-    or None if we truly cannot get any info at all (e.g., error, offline).
-    """
-    access_token, refresh_token = load_tokens_from_file()
-    if not access_token:
-        print("No access token found. Please run auth flow.")
-        return None
-
-    url = "https://api.spotify.com/v1/me/player/currently-playing"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    
-    try:
-        resp = requests.get(url, headers=headers, timeout=5)
-        if resp.status_code == 204:
-            # 204 means no content — maybe user is paused or no track info
-            return None
-        if resp.status_code == 401:
-            new_access_token, new_refresh_token = refresh_access_token(refresh_token)
-            if not new_access_token:
-                print("Token refresh failed.")
-                return None
-            # Save new tokens
-            save_tokens_to_file(new_access_token, new_refresh_token)
-            
-            # Attempt the request again with the new token
-            headers = {"Authorization": f"Bearer {new_access_token}"}
-            resp = requests.get(url, headers=headers, timeout=5)
-
-        if resp.status_code != 200:
-            print("Error status:", resp.status_code)
-            return None
-
-        data = resp.json()
-        if not data:
-            return None
-
-        # Extract the basic fields
-        currently_playing_type = data.get("currently_playing_type")
-        is_ad = (currently_playing_type == "ad")
-
-        # "item" may be None if it's an ad
-        item = data.get("item")
-        track_name = item.get("name") if item else None
-        track_id = item.get("id") if item else None
-        duration_ms = item.get("duration_ms") if item else 0
-
-        progress_ms = data.get("progress_ms", 0)
-
-        return {
-            "is_ad": is_ad,
-            "title": track_name,
-            "artists": [artist["name"] for artist in item["artists"]] if item and "artists" in item else [],
-            "duration_ms": duration_ms,
-            "progress_ms": progress_ms,
-            "track_id": track_id
-        }
-
-    except requests.exceptions.RequestException as e:
-        print("Request error:", e)
-        return None
-
-
-def get_current_volume() -> float:
-    """
-    Returns Spotify's current volume (0.0 - 1.0).
-    If Spotify is not found, returns -1.0.
-    """
-    sessions = AudioUtilities.GetAllSessions()
-    for session in sessions:
-        proc = session.Process
-        if proc and proc.name() and proc.name().lower() == 'spotify.exe':
-            volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-            return volume.GetMasterVolume()
-    return -1.0
-
-
-def set_spotify_volume(volume_percent: float) -> bool:
-    """
-    Sets Spotify's volume to volume_percent (0.0 - 100.0).
-    Returns True if successful, False otherwise.
-    """
-    volume_percent = max(0.0, min(100.0, volume_percent))
-    desired_volume = volume_percent / 100.0
-
-    sessions = AudioUtilities.GetAllSessions()
-    for session in sessions:
-        proc = session.Process
-        if proc and proc.name() and proc.name().lower() == 'spotify.exe':
-            volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-            volume.SetMasterVolume(desired_volume, None)
-            return True
-    return False
-
 def set_spotify_volume_all(volume_percent: float) -> bool:
     """
-    Set *every* Spotify audio session to `volume_percent` (0–100).
-    Returns True if at least one session was successfully updated.
+    Set all Spotify audio sessions to volume_percent (0-100).
+    Returns True if at least one session was updated.
     """
-    volume_percent = max(0.0, min(100.0, volume_percent))   # clamp
-    desired = volume_percent / 100.0                        # → scalar 0-1
+    volume_percent = max(0.0, min(100.0, volume_percent))
+    desired = volume_percent / 100.0
 
     success = False
-    for session in AudioUtilities.GetAllSessions():          # ← all sessions
+    for session in AudioUtilities.GetAllSessions():
         if _is_spotify_session(session):
             try:
-                session._ctl.QueryInterface(
-                    ISimpleAudioVolume
-                ).SetMasterVolume(desired, None)
+                session._ctl.QueryInterface(ISimpleAudioVolume).SetMasterVolume(desired, None)
                 success = True
-            except Exception as e:
-                # Don’t die because one session is funky – just log and move on
-                print(f"[Muteify] Couldn’t set volume for a Spotify session: {e}")
-
+            except Exception as exc:
+                print(f"[Muteify] Couldn't set volume for a Spotify session: {exc}")
     return success
+
 
 def get_current_spotify_volume() -> float:
     """
-    Return the *highest* volume found across all Spotify sessions.
-    (-1.0 if none are found).
+    Return highest volume across all Spotify sessions, or -1.0 if none.
     """
     volumes: Iterable[float] = [
         session._ctl.QueryInterface(ISimpleAudioVolume).GetMasterVolume()
@@ -353,59 +219,73 @@ def get_current_spotify_volume() -> float:
     return max(volumes) if volumes else -1.0
 
 
-###############################################################################
-# 3) MAIN MONITORING LOGIC
-###############################################################################
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
 
-def monitor_spotify():
+def monitor_spotify() -> None:
     """
-    Monitor Spotify for ads via the Web API metadata. If an ad is detected,
-    lower volume to 5%. When normal track resumes, restore previous volume.
+    Poll local Spotify metadata and mute ads.
     """
-    print("Muteify is running... Press Ctrl+C to stop.")
+    print("Muteify (no Spotify API) is running... Press Ctrl+C to stop.")
+
     is_lowered = False
     original_volume = None
+    last_seen_title = None
 
     while True:
         try:
-            meta = get_spotify_metadata()
-            if meta is None:
-                # Maybe user paused or there's an error
-                print("No track info. Retrying soon...")
+            if not is_spotify_running():
+                if is_lowered and original_volume is not None:
+                    set_spotify_volume_all(original_volume * 100)
+                    is_lowered = False
+                    original_volume = None
                 time.sleep(2)
                 continue
 
+            meta = get_spotify_metadata_local()
+            if meta is None:
+                print("No local track info yet. Retrying soon...")
+                time.sleep(2)
+                continue
+
+            current_window_title = meta.get("window_title")
+            if current_window_title != last_seen_title:
+                print(f"Window title: {current_window_title}")
+                last_seen_title = current_window_title
+
             if meta["is_ad"]:
-                print("Ad is playing!")
                 if not is_lowered:
                     current_vol = get_current_spotify_volume()
                     if current_vol >= 0.0:
                         original_volume = current_vol
-                    set_spotify_volume_all(5)  # 5% volume
+                    set_spotify_volume_all(5)
                     is_lowered = True
+                print("Ad inferred from local metadata. Volume lowered.")
             else:
                 track_name = meta["title"]
                 artists = meta["artists"]
-                print(f"Currently playing: {track_name} by {', '.join(artists)}")
+                if track_name:
+                    if artists:
+                        print(f"Currently playing: {track_name} by {', '.join(artists)}")
+                    else:
+                        print(f"Currently playing: {track_name}")
+
                 if is_lowered:
                     if original_volume is not None:
                         set_spotify_volume_all(original_volume * 100)
                     is_lowered = False
                     original_volume = None
+                    print("Ad ended (inferred). Volume restored.")
 
         except KeyboardInterrupt:
             print("\nStopping Muteify...")
             break
-        except Exception as e:
-            # Catch unforeseen errors to keep script running
-            print("Error in main loop:", e)
+        except Exception as exc:
+            print("Error in main loop:", exc)
 
         time.sleep(1)
 
-
-###############################################################################
-# 4) ENTRY POINT
-###############################################################################
 
 if __name__ == "__main__":
     monitor_spotify()
