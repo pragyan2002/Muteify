@@ -9,7 +9,7 @@ controls Spotify session volume through PyCaw.
 import ctypes
 import time
 from ctypes import wintypes
-from typing import Iterable, Optional
+from typing import Iterable, List, Optional, Set
 
 import psutil
 from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
@@ -35,8 +35,8 @@ def is_spotify_running() -> bool:
     return False
 
 
-def _spotify_pids() -> set[int]:
-    pids: set[int] = set()
+def _spotify_pids() -> Set[int]:
+    pids: Set[int] = set()
     for proc in psutil.process_iter(["pid", "name"]):
         name = proc.info.get("name")
         if name and name.lower() == "spotify.exe":
@@ -46,14 +46,14 @@ def _spotify_pids() -> set[int]:
     return pids
 
 
-def _window_title_for_pid(target_pids: set[int]) -> Optional[str]:
+def _window_title_for_pid(target_pids: Set[int]) -> Optional[str]:
     """
     Return the first visible top-level window title owned by a Spotify PID.
     """
     if not _is_windows or not target_pids:
         return None
 
-    titles: list[str] = []
+    titles: List[str] = []
 
     EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
