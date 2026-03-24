@@ -1,5 +1,5 @@
 # Mutify
-Muteify is a Python-based, Windows-only script that detects advertisements on the free version of Spotify and automatically lowers (or mutes) the volume while ads play. Once the ad ends, the script restores the original volume seamlessly. It uses the Spotify Web API to detect ads and the PyCaw library to control audio sessions on Windows.
+Muteify is a Python-based, Windows-only script that detects advertisements on the free version of Spotify and automatically lowers (or mutes) the volume while ads play. Once the ad ends, the script restores the original volume seamlessly. It uses local Spotify window metadata (no Spotify Web API) to infer ads and PyCaw to control audio sessions on Windows.
 ## Table of Contents
 
 1. [Features](#features)
@@ -18,7 +18,8 @@ Muteify is a Python-based, Windows-only script that detects advertisements on th
 
 - **Automatic Volume Reduction**: When an ad is detected, volume is lowered to a user-defined level (e.g., 5%).
 - **Auto-Restore Volume**: When the music track returns, the script restores your original volume.
-- **Track Metadata Display**: (Optional) Prints the name and artist of the currently playing track in the console.
+- **Track Metadata Display**: (Optional) Prints the inferred currently playing track in the console.
+- **No Spotify API Required**: No OAuth flow, tokens, or paid Spotify API access required.
 - **Smart Polling** (if implemented): Reduces the frequency of Spotify API calls by intelligently timing requests near track boundaries.
 
 ---
@@ -29,11 +30,10 @@ Muteify is a Python-based, Windows-only script that detects advertisements on th
     - Subscribes to Windows events for when `Spotify.exe` starts or stops.
     - When Spotify starts, spawn your “ad-muting” logic.
     - When Spotify stops, kill or shut down that logic.
-- **Event-Driven Track Changes**
-    - Within your ad-muting logic, either:
-        - (A) Poll the Web API at a slower rate (e.g., every 5 seconds) until you detect a track change.
-        - (B) Or if you can find a local event or semi-official approach that notifies on track changes, rely on that to trigger a single Web API call for metadata.
-    - This means you’re not hammering the Web API every second. You only check metadata when the user’s track changes or at a minimal fallback interval.
+- **Local Metadata Polling**
+    - Poll Spotify’s local desktop window title and infer whether playback appears to be an ad or track.
+    - Parse common title patterns such as `Song • Artist` or `Song - Artist`.
+    - Treat known ad-like labels (for example, “Advertisement”) as ad playback.
 - **Adjust Volume**
     - Once you know it’s an ad, set volume to 0% (or 5%) via PyCaw.
     - Once you know it’s back to a normal track, restore the volume.
@@ -46,16 +46,15 @@ Muteify is a Python-based, Windows-only script that detects advertisements on th
 - **Windows 10 or 11** (PyCaw does not support Linux/macOS).
 - **Python 3.8+**
 - **Spotify Desktop Client** (not web/Chrome-based playback).
-- A **Spotify Developer Account** to create a client app for the Web API.
 - A **free** Spotify account. (Ads only appear on free accounts.)
 
 ### Python Packages
 
 - [**psutil**](https://pypi.org/project/psutil/)
 - [**pycaw**](https://pypi.org/project/pycaw/)
-- [**requests**](https://pypi.org/project/requests/)
-- [**python-dotenv**](https://pypi.org/project/python-dotenv/) (optional, for environment variable loading)
-- [**Flask**](https://pypi.org/project/Flask/) (optional, if you use the provided Authorization Code Flow server)
+- [**requests**](https://pypi.org/project/requests/) *(optional, only needed if you still use `auth_flow.py`)*
+- [**python-dotenv**](https://pypi.org/project/python-dotenv/) *(optional, only needed if you still use `auth_flow.py`)*
+- [**Flask**](https://pypi.org/project/Flask/) *(optional, only needed if you still use `auth_flow.py`)*
 
 ---
 
@@ -76,18 +75,14 @@ If you don’t have a `requirements.txt`, manually install:
     
     ```
     
-3. **Configure** your environment variables:
-    - You’ll need `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, and `SPOTIFY_REDIRECT_URI` if you haven’t already completed the OAuth setup.
-    - Or supply them in a local `.env` file.
+3. **No OAuth Setup Needed** for the default local mode.
+    - You can run `muteify.py` directly with no Spotify Developer app and no tokens.
 
 ---
 
 ## Usage
 
-1. **Obtain Tokens**
-    - If you haven’t already authorized the script to access your Spotify account, run the provided `auth_flow.py` (or equivalent) to generate `tokens.txt`.
-    - You’ll log in via Spotify’s authorization page, and tokens (access + refresh) are saved locally.
-2. **Run Muteify**
+1. **Run Muteify**
     
     ```bash
     python muteify.py
@@ -109,14 +104,14 @@ If you don’t have a `requirements.txt`, manually install:
         ```
         
     - When an ad is detected, volume is lowered.
-3. **Stop the Script**
+2. **Stop the Script**
     - Press `Ctrl+C` in your terminal to gracefully exit.
 
 ---
 
-## Authorization Code Flow
+## Authorization Code Flow (Optional / Legacy)
 
-- **Purpose**: The Spotify Web API requires OAuth tokens to access user-specific data (like “currently playing” info).
+- **Purpose**: Only needed if you are experimenting with a Web API-based variant. The default script no longer depends on Spotify Web API.
 - **Workflow**:
     1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/) and create an application.
     2. Retrieve **Client ID** and **Client Secret**.
@@ -127,7 +122,7 @@ If you don’t have a `requirements.txt`, manually install:
         - Receives the authorization code in `/callback`.
         - Exchanges it for `ACCESS_TOKEN` and `REFRESH_TOKEN`.
         - Saves them into `tokens.txt`.
-    5. **Muteify** loads `tokens.txt` on startup, refreshes tokens if needed, and calls the Spotify API with `Bearer <ACCESS_TOKEN>`.
+5. A Web API-based variant would load `tokens.txt`; the default local window-title variant does not use this.
 
 ---
 
@@ -148,6 +143,10 @@ If you don’t have a `requirements.txt`, manually install:
 5. **Timeout or Network Issues**
     - Increase `timeout=5` to `timeout=10` in the `requests.get(...)` calls if you have a slow connection.
     - Wrap in `try/except requests.exceptions.Timeout` to handle gracefully.
+6. **Local metadata isn’t detected**
+    - Bring Spotify to the foreground briefly so it has a visible desktop window title.
+    - Confirm you’re running the desktop Spotify app (not browser playback).
+    - Some ad/title formats can vary by region and language; adjust ad keyword matching in `muteify.py` if needed.
 
 ---
 
