@@ -134,9 +134,11 @@ def _parse_spotify_window_title(title: str) -> dict:
             "artists": [],
         }
 
-    # Single-piece title fallback.
+    # Single-piece title fallback:
+    # In local metadata mode, ads commonly appear as a lone phrase with no artist.
+    # Treat this as ad-like by default so volume lowering still triggers.
     return {
-        "is_ad": False,
+        "is_ad": True,
         "title": title,
         "artists": [],
     }
@@ -232,6 +234,7 @@ def monitor_spotify() -> None:
     is_lowered = False
     original_volume = None
     last_seen_title = None
+    last_printed_track = None
 
     while True:
         try:
@@ -255,21 +258,27 @@ def monitor_spotify() -> None:
                 last_seen_title = current_window_title
 
             if meta["is_ad"]:
+                last_printed_track = None
                 if not is_lowered:
                     current_vol = get_current_spotify_volume()
                     if current_vol >= 0.0:
                         original_volume = current_vol
                     set_spotify_volume_all(5)
                     is_lowered = True
-                print("Ad inferred from local metadata. Volume lowered.")
+                    print("Ad inferred from local metadata. Volume lowered.")
             else:
                 track_name = meta["title"]
                 artists = meta["artists"]
                 if track_name:
+                    track_key = (track_name, tuple(artists))
+                    if track_key == last_printed_track:
+                        time.sleep(1)
+                        continue
                     if artists:
                         print(f"Currently playing: {track_name} by {', '.join(artists)}")
                     else:
                         print(f"Currently playing: {track_name}")
+                    last_printed_track = track_key
 
                 if is_lowered:
                     if original_volume is not None:
