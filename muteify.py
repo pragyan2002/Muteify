@@ -26,6 +26,26 @@ else:
     _user32 = None
 
 
+_instance_mutex = None
+
+
+def _acquire_single_instance() -> bool:
+    """Prevent a manual launch and the scheduled task from running twice."""
+    global _instance_mutex
+    if not _is_windows:
+        return True
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    mutex_name = "Local\\MuteifySpotifyAdMuter"
+    _instance_mutex = kernel32.CreateMutexW(None, False, mutex_name)
+    if not _instance_mutex:
+        return False
+
+    # ERROR_ALREADY_EXISTS means another Muteify process owns this mutex.
+    return kernel32.GetLastError() != 183
+
+
 def is_spotify_running() -> bool:
     """Return True if Spotify.exe is running."""
     for proc in psutil.process_iter(["name"]):
@@ -297,4 +317,5 @@ def monitor_spotify() -> None:
 
 
 if __name__ == "__main__":
-    monitor_spotify()
+    if _acquire_single_instance():
+        monitor_spotify()
