@@ -45,6 +45,10 @@ def _acquire_single_instance() -> bool:
     kernel32.CreateMutexW.restype = wintypes.HANDLE
     kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
     mutex_name = "Local\\MuteifySpotifyAdMuter"
+    # ctypes writes its own saved error value into the OS slot before every
+    # call, and CreateMutexW does not clear it on success. Zero it first so a
+    # 183 below can only have come from this call.
+    ctypes.set_last_error(0)
     _instance_mutex = kernel32.CreateMutexW(None, False, mutex_name)
     if not _instance_mutex:
         return False
@@ -387,12 +391,15 @@ def _redirect_output_to_log() -> None:
     if sys.stdout is not None:
         return
     log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "muteify.log")
-    # ponytail: truncate per run instead of rotating; prints are already
-    # deduplicated per track, so one session's log stays small. Swap in
-    # logging.handlers.RotatingFileHandler if that stops being true.
-    stream = open(log_path, "w", encoding="utf-8", buffering=1)
+    # Append, never truncate: a second copy exiting on the mutex would
+    # otherwise wipe the log of the copy that is actually running.
+    # ponytail: append forever instead of rotating; prints are deduplicated per
+    # track so growth is slow. Swap in logging.handlers.RotatingFileHandler if
+    # that stops being true.
+    stream = open(log_path, "a", encoding="utf-8", buffering=1)
     sys.stdout = stream
     sys.stderr = stream
+    print(f"=== Muteify started {time.strftime('%Y-%m-%d %H:%M:%S')} (pid {os.getpid()}) ===")
 
 
 if __name__ == "__main__":

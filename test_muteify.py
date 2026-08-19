@@ -87,9 +87,21 @@ def test_window_cache_rejects_stale_handles():
         muteify._cached_window = saved
 
 
+def test_single_instance_lets_the_first_copy_run():
+    """
+    The first copy must win. It once lost: CreateMutexW does not clear the
+    last-error slot on success, so a stale 183 from an unrelated call made the
+    only Muteify at logon exit as a "duplicate".
+    """
+    assert muteify._acquire_single_instance(), "first instance was refused"
+    # Same process, mutex already owned -> ERROR_ALREADY_EXISTS is real now.
+    assert not muteify._acquire_single_instance(), "duplicate was allowed"
+
+
 if __name__ == "__main__":
     test_title_parsing()
     test_window_cache_rejects_stale_handles()
     test_mute_does_not_latch_without_an_audio_session()
     test_restore_never_strands_volume_at_five_percent()
+    test_single_instance_lets_the_first_copy_run()
     print("all checks passed")
