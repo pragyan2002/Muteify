@@ -43,7 +43,9 @@ if ($legacyTask) {
         Unregister-ScheduledTask -TaskName "Muteify - Spotify ad muter" -Confirm:$false -ErrorAction Stop
         Write-Host "Removed the old 'Muteify - Spotify ad muter' Scheduled Task."
     } catch {
-        Write-Warning "Could not remove the old Scheduled Task (needs an elevated PowerShell). The startup shortcut still works; Muteify's mutex stops a second copy from running."
+        Write-Warning "Could not remove the old Scheduled Task (needs an elevated PowerShell)."
+        Write-Warning "Leave it and Muteify breaks at logon: the task and the shortcut both start a copy, one exits on the mutex, and Task Scheduler then stops the survivor on battery (StopIfGoingOnBatteries), leaving nothing running."
+        Write-Warning "Run this in an elevated PowerShell: Unregister-ScheduledTask -TaskName 'Muteify - Spotify ad muter' -Confirm:$false"
     }
 }
 

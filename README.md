@@ -68,6 +68,14 @@ remove that leftover task, but deleting it needs an **elevated** PowerShell:
 Unregister-ScheduledTask -TaskName "Muteify - Spotify ad muter" -Confirm:$false
 ```
 
+Until it is gone, Muteify is worse off than with no autostart at all: the task
+and the shortcut each start a copy at logon, the loser exits on the mutex, and
+Task Scheduler then stops the winner on battery, so nothing is left running.
+Confirm your setup with `Get-Process pythonw`. Expect one Muteify, which shows
+up as two entries: this `.venv` is a redirector, so `.venv\Scripts\pythonw.exe`
+launches the base interpreter as a child and both stay alive. Anything more than
+that pair means a second copy is starting from somewhere.
+
 If PowerShell blocks local scripts, run the installer explicitly with:
 
 ```powershell
