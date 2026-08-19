@@ -3,3 +3,4 @@ tokens.txt
 .venv/
 __pycache__/
 *.py[cod]
+muteify.log
