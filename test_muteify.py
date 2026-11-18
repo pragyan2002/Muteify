@@ -6,10 +6,12 @@ import muteify
 def test_title_parsing():
     assert muteify._parse_spotify_window_title("Advertisement")["is_ad"]
     assert muteify._parse_spotify_window_title("Spotify Advertisement")["is_ad"]
-    # A bare dash is what Spotify shows while paused; muting on it dropped the
-    # volume to 5% on every pause.
-    for idle in ("Spotify", "Spotify Premium", "Spotify Free", "-", "–", "—"):
-        assert not muteify._parse_spotify_window_title(idle)["is_ad"], idle
+    for idle in ("Spotify", "Spotify Premium", "Spotify Free"):
+        assert muteify._parse_spotify_window_title(idle)["is_ad"] is False, idle
+    # A bare dash shows while paused AND between ads in a break: it must neither
+    # mute (every pause dropped to 5%) nor restore (an ad played at full volume).
+    for dash in ("-", "–", "—"):
+        assert muteify._parse_spotify_window_title(dash)["is_ad"] is None, dash
     track = muteify._parse_spotify_window_title("Billy Joel - Just the Way You Are")
     assert not track["is_ad"] and track["artists"]
 

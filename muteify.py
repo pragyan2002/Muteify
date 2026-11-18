@@ -31,6 +31,12 @@ else:
 _instance_mutex = None
 
 
+def _log(*args) -> None:
+    # The log has no other clock; without this an ad that slipped through
+    # can't be matched to the title Spotify showed while it played.
+    print(time.strftime("%Y-%m-%d %H:%M:%S"), *args)
+
+
 def _acquire_single_instance() -> bool:
     """Prevent a manual launch and the scheduled task from running twice."""
     global _instance_mutex
@@ -189,11 +195,19 @@ def _parse_spotify_window_title(title: str) -> dict:
                     "artists": [artist],
                 }
 
+    # Spotify shows a bare dash both while paused and between ads in a break.
+    # Muting on it dropped the volume on every pause; restoring on it let the
+    # second ad of a break play at full volume. So it means "no change":
+    # is_ad None keeps whatever mute state is already in place.
+    if lowered in {"-", "–", "—"}:
+        return {
+            "is_ad": None,
+            "title": None,
+            "artists": [],
+        }
+
     # Unknown/non-track states often show just "Spotify" or single labels.
-    # Spotify titles its window with a bare dash while paused or stopped, which
-    # the single-piece fallback below would otherwise read as an ad and drop the
-    # volume to 5% every time playback is paused.
-    if lowered in {"spotify", "spotify premium", "spotify free", "-", "–", "—"}:
+    if lowered in {"spotify", "spotify premium", "spotify free"}:
         return {
             "is_ad": False,
             "title": None,
@@ -279,7 +293,7 @@ def set_spotify_volume_all(volume_percent: float) -> bool:
                 session._ctl.QueryInterface(ISimpleAudioVolume).SetMasterVolume(desired, None)
                 success = True
             except Exception as exc:
-                print(f"[Muteify] Couldn't set volume for a Spotify session: {exc}")
+                _log(f"[Muteify] Couldn't set volume for a Spotify session: {exc}")
     return success
 
 
@@ -311,7 +325,7 @@ def monitor_spotify() -> None:
     """
     Poll local Spotify metadata and mute ads.
     """
-    print("Muteify (no Spotify API) is running... Press Ctrl+C to stop.")
+    _log("Muteify (no Spotify API) is running... Press Ctrl+C to stop.")
 
     is_lowered = False
     original_volume = None
@@ -328,7 +342,7 @@ def monitor_spotify() -> None:
                     is_lowered = False
                     original_volume = None
                 if last_seen_title is not None:
-                    print("Spotify window gone. Waiting for it to come back...")
+                    _log("Spotify window gone. Waiting for it to come back...")
                     last_seen_title = None
                     last_printed_track = None
                 time.sleep(IDLE_POLL_SECONDS)
@@ -336,10 +350,12 @@ def monitor_spotify() -> None:
 
             current_window_title = meta.get("window_title")
             if current_window_title != last_seen_title:
-                print(f"Window title: {current_window_title}")
+                _log(f"Window title: {current_window_title}")
                 last_seen_title = current_window_title
 
-            if meta["is_ad"]:
+            if meta["is_ad"] is None:
+                pass  # paused or between ads: keep the current mute state
+            elif meta["is_ad"]:
                 last_printed_track = None
                 if not is_lowered:
                     # Spotify only owns an audio session once it has played
@@ -350,7 +366,7 @@ def monitor_spotify() -> None:
                     if set_spotify_volume_all(5):
                         original_volume = current_vol if current_vol >= 0.0 else 1.0
                         is_lowered = True
-                        print("Ad inferred from local metadata. Volume lowered.")
+                        _log("Ad inferred from local metadata. Volume lowered.")
             else:
                 track_name = meta["title"]
                 artists = meta["artists"]
@@ -360,9 +376,9 @@ def monitor_spotify() -> None:
                         time.sleep(POLL_SECONDS)
                         continue
                     if artists:
-                        print(f"Currently playing: {track_name} by {', '.join(artists)}")
+                        _log(f"Currently playing: {track_name} by {', '.join(artists)}")
                     else:
-                        print(f"Currently playing: {track_name}")
+                        _log(f"Currently playing: {track_name}")
                     last_printed_track = track_key
 
                 if is_lowered:
@@ -371,13 +387,13 @@ def monitor_spotify() -> None:
                     if set_spotify_volume_all((original_volume or 1.0) * 100):
                         is_lowered = False
                         original_volume = None
-                        print("Ad ended (inferred). Volume restored.")
+                        _log("Ad ended (inferred). Volume restored.")
 
         except KeyboardInterrupt:
-            print("\nStopping Muteify...")
+            _log("Stopping Muteify...")
             break
         except Exception as exc:
-            print("Error in main loop:", exc)
+            _log("Error in main loop:", exc)
 
         time.sleep(POLL_SECONDS)
 
@@ -407,4 +423,4 @@ if __name__ == "__main__":
     if _acquire_single_instance():
         monitor_spotify()
     else:
-        print("Another Muteify instance is already running. Exiting.")
+        _log("Another Muteify instance is already running. Exiting.")
